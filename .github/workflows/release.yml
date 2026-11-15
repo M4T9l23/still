@@ -132,7 +132,9 @@ jobs:
           codesign --verify --verbose "$APP"
 
           ln -s /Applications dmg/Applications
-          hdiutil create -volname Still -srcfolder dmg -ov -format UDZO Still-macos.dmg
+          # hdiutil's own size estimate can come out too small ("No space left on device")
+          SIZE_MB=$(( $(du -sm dmg | cut -f1) + 40 ))
+          hdiutil create -volname Still -srcfolder dmg -size ${SIZE_MB}m -fs HFS+ -ov -format UDZO Still-macos.dmg
           ls -la Still-macos.dmg
       - uses: actions/upload-artifact@v4
         with:
