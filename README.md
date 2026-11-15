@@ -106,4 +106,4 @@ Settings, saved presets and the Recent list are stored in `~/.config/still/setti
 
 The interface font is Adwaita Sans, bundled under the SIL Open Font License (`assets/fonts/OFL.txt`). It is also the built-in font for text layers; fonts added with **Add Font…** are kept in the `fonts` folder next to the settings.
 
-The icon is rendered in Blender from `assets/icon-source/still_icon.py` (`blender -b -P assets/icon-source/still_icon.py -- out.png 1024 256`), then saved as `assets/icon.png`, `assets/icon-256.png` and the Windows `assets/icon.ico`, which `build.rs` puts into Still.exe.
+The icon is kept as `assets/icon.png` (1024 px, used for the macOS .icns), `assets/icon-256.png` (window icon, Linux, AppImage) and the Windows `assets/icon.ico`, which `build.rs` puts into Still.exe.
