@@ -378,6 +378,15 @@ impl Params {
     /// grain and glitches, e.g. for each frame of an animation).
     pub fn reseeded(&self, step: u32) -> Params {
         let bump = |s: u32| if s == 0 { 0 } else { s.wrapping_add(step.wrapping_mul(7919)).max(1) };
+        let mut masks = self.masks.clone();
+        // masks' own effects get a new arrangement too
+        for m in &mut masks {
+            let f = &mut m.fx;
+            f.seed = f.seed.wrapping_add(step.wrapping_mul(7919)).max(1);
+            for s in [&mut f.seed_sort, &mut f.seed_streaks, &mut f.seed_slices, &mut f.seed_blocks, &mut f.seed_grain] {
+                *s = bump(*s);
+            }
+        }
         Params {
             seed: self.seed.wrapping_add(step.wrapping_mul(7919)).max(1),
             seed_sort: bump(self.seed_sort),
@@ -385,6 +394,7 @@ impl Params {
             seed_slices: bump(self.seed_slices),
             seed_blocks: bump(self.seed_blocks),
             seed_grain: bump(self.seed_grain),
+            masks,
             ..self.clone()
         }
     }
@@ -393,6 +403,48 @@ impl Params {
     /// far past the slider; this keeps the output a sane size.
     pub fn border_amount(&self) -> f32 {
         if self.border.is_finite() { self.border.clamp(0.0, 3.0) } else { 0.0 }
+    }
+
+    /// Put one slider back to its default (by field name), e.g. to preview
+    /// the picture without it.
+    /// Returns whether it changed anything.
+    pub fn reset_field(&mut self, name: &str) -> bool {
+        let d = Params::default();
+        macro_rules! fields {
+            ($($f:ident),*) => {
+                match name {
+                    $(stringify!($f) => std::mem::replace(&mut self.$f, d.$f) != d.$f,)*
+                    _ => false,
+                }
+            };
+        }
+        fields!(
+            exposure, contrast, highlights, shadows, whites, blacks, fade, temperature, tint, saturation, vibrance, mono, shadow_hue,
+            shadow_tone, highlight_hue, highlight_tone, sharpen, softness, bloom, bloom_radius, bloom_threshold, astig, astig_length,
+            astig_angle, astig_rays, halation, aberration, vignette, vignette_feather, grain, grain_size, grain_color, sensor_noise,
+            scanlines, scanline_spacing, posterize, dither, lowres, lowres_smooth, sort_amount, sort_low, sort_high, sort_vertical,
+            sort_reverse, streaks, streak_width, slices, slice_shift, rgb_split, rgb_angle, blocks, block_size, straighten, border
+        )
+    }
+
+    /// Bring an edit from an older version up to date. Older projects could
+    /// limit the whole Effects (or Glitch) tab to one mask; that mask now
+    /// carries those settings as its own.
+    pub fn migrate(&mut self) {
+        for i in 0..self.masks.len() {
+            let (fx, gl, on) = (self.masks[i].effects, self.masks[i].glitch, self.masks[i].enabled);
+            let mut mfx = self.masks[i].fx.clone();
+            if fx && on {
+                mfx.take_effects(self);
+            }
+            if gl && on {
+                mfx.take_glitch(self);
+            }
+            let m = &mut self.masks[i];
+            m.fx = mfx;
+            m.effects = false;
+            m.glitch = false;
+        }
     }
 
     /// The layers as they render: members of a hidden group count as hidden.
@@ -408,6 +460,92 @@ impl Params {
             }
         }
         std::borrow::Cow::Owned(v)
+    }
+}
+
+/// Declares [`MaskFx`]: a mask's own copy of the Effects and Glitch settings,
+/// with the same names, types and defaults as in [`Params`].
+macro_rules! mask_fx {
+    (effects: [$($e:ident: $et:ty),* $(,)?], glitch: [$($g:ident: $gt:ty),* $(,)?]) => {
+        /// A mask's own Effects and Glitch settings. They show only inside the
+        /// mask, on top of whatever the whole photo has.
+        #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+        #[serde(default)]
+        pub struct MaskFx {
+            $(pub $e: $et,)*
+            $(pub $g: $gt,)*
+        }
+
+        impl Default for MaskFx {
+            fn default() -> Self {
+                MaskFx::read(&Params::default())
+            }
+        }
+
+        impl MaskFx {
+            /// The effect settings of `p`.
+            pub fn read(p: &Params) -> Self {
+                MaskFx { $($e: p.$e,)* $($g: p.$g,)* }
+            }
+            /// Write these settings into `p`, leaving the rest of it alone.
+            pub fn write(&self, p: &mut Params) {
+                $(p.$e = self.$e;)*
+                $(p.$g = self.$g;)*
+            }
+            /// Move the Effects tab's settings from `p` to here, leaving `p` without effects.
+            pub fn take_effects(&mut self, p: &mut Params) {
+                let d = Params::default();
+                $(self.$e = std::mem::replace(&mut p.$e, d.$e);)*
+            }
+            /// Move the Glitch tab's settings from `p` to here, leaving `p` without glitches.
+            pub fn take_glitch(&mut self, p: &mut Params) {
+                let d = Params::default();
+                $(self.$g = std::mem::replace(&mut p.$g, d.$g);)*
+            }
+        }
+    };
+}
+
+mask_fx!(
+    effects: [
+        bloom: f32, bloom_radius: f32, bloom_threshold: f32, astig: f32, astig_length: f32, astig_angle: f32, astig_rays: u8,
+        halation: f32, aberration: f32, vignette: f32, vignette_feather: f32, grain: f32, grain_size: f32, grain_color: f32,
+        sensor_noise: f32, scanlines: f32, scanline_spacing: f32, posterize: f32, dither: bool, lowres: f32, lowres_smooth: bool,
+        seed_grain: u32,
+    ],
+    glitch: [
+        seed: u32, sort_amount: f32, sort_low: f32, sort_high: f32, sort_vertical: bool, sort_reverse: bool, streaks: f32,
+        streak_width: f32, slices: f32, slice_shift: f32, rgb_split: f32, rgb_angle: f32, blocks: f32, block_size: f32,
+        seed_sort: u32, seed_streaks: u32, seed_slices: u32, seed_blocks: u32,
+    ]
+);
+
+impl MaskFx {
+    pub fn is_default(&self) -> bool {
+        *self == MaskFx::default()
+    }
+    /// The settings as a full set of params, for the effect passes.
+    pub fn params(&self) -> Params {
+        let mut p = Params::default();
+        self.write(&mut p);
+        p
+    }
+    /// Returns whether it changed anything.
+    pub fn reset_field(&mut self, name: &str) -> bool {
+        let mut p = self.params();
+        let changed = p.reset_field(name);
+        *self = MaskFx::read(&p);
+        changed
+    }
+    pub fn has_glow(&self) -> bool {
+        has_glow(&self.params())
+    }
+    /// Anything from the Effects tab besides the glow (which runs earlier).
+    pub fn has_effects(&self) -> bool {
+        has_late_effects(&self.params())
+    }
+    pub fn has_glitch(&self) -> bool {
+        has_glitch(&self.params())
     }
 }
 
@@ -765,21 +903,55 @@ fn keep_inside(img: &mut Img, before: &Img, a: &[f32]) {
     });
 }
 
-/// Run `f` on the picture, limited to the area `a` when there is one.
-fn limited(img: &mut Img, a: Option<&Vec<f32>>, f: impl FnOnce(&mut Img)) {
-    match a {
-        Some(a) => {
-            let before = img.clone();
-            f(img);
-            keep_inside(img, &before, a);
-        }
-        None => f(img),
+/// The glow a set of effect settings adds to a linear-light picture
+/// (bloom, halation, astigmatism), or None when it adds none.
+fn glow(img: &Img, p: &Params, u: f32) -> Option<Img> {
+    if !has_glow(p) {
+        return None;
     }
+    // The glow comes from the photo's own highlights: the threshold is relative
+    // to its bright end, so a dull daylight frame or a flat RAW still blooms.
+    let hi = percentile_luma(img, 0.97).max(0.02);
+    let t = hi * (0.25 + p.bloom_threshold * 0.85);
+    let knee = (hi - t).max(hi * 0.25);
+    let norm = 1.0 / hi.max(0.25);
+    let mut bright = img.clone();
+    bright.px.par_iter_mut().for_each(|px| {
+        let m = smoothstep(t, t + knee, luma(*px)) * norm;
+        for c in 0..3 {
+            px[c] *= m;
+        }
+    });
+    let bloom = (p.bloom > 0.001).then(|| blur(&bright, (8.0 + p.bloom_radius * 60.0) * u));
+    let hal = (p.halation > 0.001).then(|| blur(&bright, 9.0 * u));
+    let astig = (p.astig > 0.001).then(|| light_streaks(&bright, (20.0 + p.astig_length * 380.0) * u, p.astig_angle.to_radians(), p.astig_rays.clamp(1, 4)));
+    let tint = [1.0, 0.22, 0.06];
+    let mut out = Img::new(img.w, img.h);
+    out.px.par_iter_mut().enumerate().for_each(|(i, px)| {
+        if let Some(b) = &bloom {
+            for c in 0..3 {
+                px[c] += b.px[i][c] * p.bloom * 0.9;
+            }
+        }
+        if let Some(a) = &astig {
+            for c in 0..3 {
+                px[c] += a.px[i][c] * p.astig * 3.5;
+            }
+        }
+        if let Some(h) = &hal {
+            // only the light that bleeds *past* the highlight edge
+            let l = (luma(h.px[i]) - luma(bright.px[i]) * 0.6).max(0.0);
+            for c in 0..3 {
+                px[c] += l * tint[c] * p.halation * 3.0;
+            }
+        }
+    });
+    Some(out)
 }
 
 /// The look: exposure, white balance and glow in linear light, then tone and
-/// colour. `glow_a` limits the glow to the Effects tab's mask.
-fn look(img: &mut Img, p: &Params, u: f32, glow_a: Option<&[f32]>) {
+/// colour. `glows` are masks' own glow settings, each with the mask's area.
+fn look(img: &mut Img, p: &Params, u: f32, glows: &[(Params, Vec<f32>)]) {
     // --- Linear-light stage: exposure, white balance, bloom, halation -------
     let gain = 2f32.powf(p.exposure.clamp(-30.0, 30.0));
     let wb = [
@@ -793,42 +965,20 @@ fn look(img: &mut Img, p: &Params, u: f32, glow_a: Option<&[f32]>) {
         }
     });
 
-    if p.bloom > 0.001 || p.halation > 0.001 || p.astig > 0.001 {
-        // The glow comes from the photo's own highlights: the threshold is relative
-        // to its bright end, so a dull daylight frame or a flat RAW still blooms.
-        let hi = percentile_luma(&img, 0.97).max(0.02);
-        let t = hi * (0.25 + p.bloom_threshold * 0.85);
-        let knee = (hi - t).max(hi * 0.25);
-        let norm = 1.0 / hi.max(0.25);
-        let mut bright = img.clone();
-        bright.px.par_iter_mut().for_each(|px| {
-            let m = smoothstep(t, t + knee, luma(*px)) * norm;
+    // every glow comes from the picture as it is here, so they don't feed each other
+    let whole = glow(img, p, u);
+    let local: Vec<(Img, &Vec<f32>)> = glows.iter().filter_map(|(q, a)| glow(img, q, u).map(|g| (g, a))).collect();
+    if let Some(g) = &whole {
+        img.px.par_iter_mut().zip(g.px.par_iter()).for_each(|(px, g)| {
             for c in 0..3 {
-                px[c] *= m;
+                px[c] += g[c];
             }
         });
-        let bloom = (p.bloom > 0.001).then(|| blur(&bright, (8.0 + p.bloom_radius * 60.0) * u));
-        let hal = (p.halation > 0.001).then(|| blur(&bright, 9.0 * u));
-        let astig = (p.astig > 0.001).then(|| light_streaks(&bright, (20.0 + p.astig_length * 380.0) * u, p.astig_angle.to_radians(), p.astig_rays.clamp(1, 4)));
-        let tint = [1.0, 0.22, 0.06];
-        img.px.par_iter_mut().enumerate().for_each(|(i, px)| {
-            let w = glow_a.map(|a| a[i]).unwrap_or(1.0);
-            if let Some(b) = &bloom {
-                for c in 0..3 {
-                    px[c] += b.px[i][c] * p.bloom * 0.9 * w;
-                }
-            }
-            if let Some(a) = &astig {
-                for c in 0..3 {
-                    px[c] += a.px[i][c] * p.astig * 3.5 * w;
-                }
-            }
-            if let Some(h) = &hal {
-                // only the light that bleeds *past* the highlight edge
-                let l = (luma(h.px[i]) - luma(bright.px[i]) * 0.6).max(0.0);
-                for c in 0..3 {
-                    px[c] += l * tint[c] * p.halation * 3.0 * w;
-                }
+    }
+    for (g, a) in &local {
+        img.px.par_iter_mut().zip(g.px.par_iter()).zip(a.par_iter()).for_each(|((px, g), &w)| {
+            for c in 0..3 {
+                px[c] += g[c] * w;
             }
         });
     }
@@ -929,23 +1079,46 @@ struct Stage {
     judged: Option<Judged>,
 }
 
+#[derive(Clone)]
 struct Judged {
-    fx_a: Option<Vec<f32>>,
-    gl_a: Option<Vec<f32>>,
+    fx: MaskEffects,
     overlay: Option<Vec<f32>>,
     cut: Option<Vec<f32>>,
 }
 
-fn effects_mask(m: &crate::masks::Mask) -> bool {
-    m.effects
-}
+/// Masks' own effect settings, each with the mask's area.
+type MaskEffects = Vec<(Params, Vec<f32>)>;
 
-fn glitch_mask(m: &crate::masks::Mask) -> bool {
-    m.glitch
-}
-
-fn has_glow(p: &Params) -> bool {
+pub(crate) fn has_glow(p: &Params) -> bool {
     p.bloom > 0.001 || p.halation > 0.001 || p.astig > 0.001
+}
+
+fn has_glitch(p: &Params) -> bool {
+    p.blocks > 0.001 || p.sort_amount > 0.001 || p.slices > 0.001 || p.streaks > 0.001 || p.rgb_split > 0.001
+}
+
+/// Effects tab settings that run after the masks (everything but the glow).
+fn has_late_effects(p: &Params) -> bool {
+    p.lowres > 0.001
+        || p.aberration > 0.001
+        || p.posterize > 0.001
+        || p.scanlines > 0.001
+        || p.sensor_noise > 0.001
+        || p.grain > 0.001
+        || p.vignette.abs() > 0.001
+}
+
+/// The areas of the masks whose own settings `pick` says are in use, judged on `img`.
+fn mask_effects(img: &Img, p: &Params, space: &crate::masks::Space, pick: fn(&MaskFx) -> bool) -> MaskEffects {
+    p.masks
+        .iter()
+        .filter(|m| m.enabled && pick(&m.fx))
+        .map(|m| (m.fx.params(), crate::masks::alpha(img, m, space)))
+        .collect()
+}
+
+fn late_fx(f: &MaskFx) -> bool {
+    f.has_effects() || f.has_glitch()
 }
 
 /// Masks are judged on the photo alone whenever layers are in the picture.
@@ -957,19 +1130,17 @@ fn base(src: &Img, p: &Params, overlay: Option<usize>) -> Stage {
     let (photo, space) = geometry(src, p);
     let u = photo.unit();
     let layers = p.shown_layers();
-    let glow = has_glow(p);
-    // the glow is added before the tone stage, so its mask is judged on the photo as it comes in
-    let glow_mask = |img: &Img| if glow { crate::masks::union_alpha(img, &p.masks, &space, effects_mask) } else { None };
+    // the glow is added before the tone stage, so masks' own glow is judged on the photo as it comes in
+    let glows = |img: &Img| mask_effects(img, p, &space, MaskFx::has_glow);
 
     if judged_first(p) {
         // Masks are judged on the photo alone, so moving a layer never changes
         // a selection, and a cut-out removes only the photo.
-        let glow_a = glow_mask(&photo);
+        let glow_a = glows(&photo);
         let mut judge = photo.clone();
-        look(&mut judge, p, u, glow_a.as_deref());
+        look(&mut judge, p, u, &glow_a);
         let areas = crate::masks::apply(&mut judge, &p.masks, &space, u, overlay);
-        let fx_a = crate::masks::union_alpha(&judge, &p.masks, &space, effects_mask);
-        let gl_a = crate::masks::union_alpha(&judge, &p.masks, &space, glitch_mask);
+        let fx = mask_effects(&judge, p, &space, late_fx);
         drop(judge);
         let mut img = photo;
         let mut cut = areas.cutout.clone();
@@ -978,17 +1149,17 @@ fn base(src: &Img, p: &Params, overlay: Option<usize>) -> Stage {
             crate::layers::composite_behind(&mut img, a, &layers, true, &space);
         }
         crate::layers::composite(&mut img, &layers, true, &space, cut.as_deref_mut());
-        look(&mut img, p, u, glow_a.as_deref());
+        look(&mut img, p, u, &glow_a);
         crate::masks::adjust_with(&mut img, &p.masks, &areas, u);
-        return Stage { img, space, judged: Some(Judged { fx_a, gl_a, overlay: areas.overlay, cut }) };
+        return Stage { img, space, judged: Some(Judged { fx, overlay: areas.overlay, cut }) };
     }
     // no layers (or no masks): everything is judged on the picture itself
     let mut img = photo;
     if !layers.is_empty() {
         crate::layers::composite(&mut img, &layers, true, &space, None);
     }
-    let glow_a = glow_mask(&img);
-    look(&mut img, p, u, glow_a.as_deref());
+    let glow_a = glows(&img);
+    look(&mut img, p, u, &glow_a);
     Stage { img, space, judged: None }
 }
 
@@ -996,12 +1167,11 @@ fn base(src: &Img, p: &Params, overlay: Option<usize>) -> Stage {
 fn from_stage(mut img: Img, space: &crate::masks::Space, judged: Option<Judged>, p: &Params, overlay: Option<usize>) -> Rendered {
     let u = img.unit();
     match judged {
-        Some(j) => finish(img, p, u, space, j.fx_a, j.gl_a, j.overlay, j.cut),
+        Some(j) => finish(img, p, u, space, &j.fx, j.overlay, j.cut),
         None => {
             let areas = if p.masks.is_empty() { Default::default() } else { crate::masks::apply(&mut img, &p.masks, space, u, overlay) };
-            let fx_a = crate::masks::union_alpha(&img, &p.masks, space, effects_mask);
-            let gl_a = crate::masks::union_alpha(&img, &p.masks, space, glitch_mask);
-            finish(img, p, u, space, fx_a, gl_a, areas.overlay, areas.cutout)
+            let fx = mask_effects(&img, p, space, late_fx);
+            finish(img, p, u, space, &fx, areas.overlay, areas.cutout)
         }
     }
 }
@@ -1028,10 +1198,9 @@ fn stage_key(p: &Params, overlay: Option<usize>) -> StageKey {
     let judged = judged_first(p);
     let masks = if judged {
         p.masks.clone()
-    } else if has_glow(p) {
-        p.masks.iter().filter(|m| m.enabled && m.effects).cloned().collect()
     } else {
-        Vec::new()
+        // only masks with their own glow reach into the first stage
+        p.masks.iter().filter(|m| m.enabled && m.fx.has_glow()).cloned().collect()
     };
     let key = Params {
         rotate: p.rotate,
@@ -1086,7 +1255,7 @@ pub fn process_cached(src: &Arc<Img>, p: &Params, overlay: Option<usize>, cache:
             stage
         }
     };
-    let judged = stage.judged.as_ref().map(|j| Judged { fx_a: j.fx_a.clone(), gl_a: j.gl_a.clone(), overlay: j.overlay.clone(), cut: j.cut.clone() });
+    let judged = stage.judged.clone();
     from_stage(stage.img.clone(), &stage.space, judged, p, overlay)
 }
 
@@ -1096,16 +1265,15 @@ pub fn half(img: &Img) -> Img {
 }
 
 /// Everything after the look and the masks: detail, effects, glitches, the
-/// layers on top, and the border. `alpha` is the picture's opacity, if any of
-/// it was cut out.
-#[allow(clippy::too_many_arguments)]
+/// layers on top, and the border. `fx` are masks' own effect settings, each
+/// with the mask's area. `alpha` is the picture's opacity, if any of it was
+/// cut out.
 fn finish(
     mut img: Img,
     p: &Params,
     u: f32,
     space: &crate::masks::Space,
-    fx_a: Option<Vec<f32>>,
-    gl_a: Option<Vec<f32>>,
+    fx: &[(Params, Vec<f32>)],
     overlay: Option<Vec<f32>>,
     mut alpha: Option<Vec<f32>>,
 ) -> Rendered {
@@ -1128,61 +1296,12 @@ fn finish(
         });
     }
 
-    // --- Resolution --------------------------------------------------------
-    if p.lowres > 0.001 {
-        let lo = low_res(&img, p);
-        match &fx_a {
-            Some(a) => {
-                let before = std::mem::replace(&mut img, lo);
-                keep_inside(&mut img, &before, a);
-            }
-            None => img = lo,
-        }
-    }
-
-    // --- Glitch ------------------------------------------------------------
-    let split = p.rgb_split > 0.001;
-    let aberration = p.aberration > 0.001;
-    // RGB split (Glitch) and aberration (Effects) share one pass unless
-    // either tab is limited to a mask
-    let separate = fx_a.is_some() || gl_a.is_some();
-    let any_glitch = p.blocks > 0.001 || p.sort_amount > 0.001 || p.slices > 0.001 || p.streaks > 0.001 || split;
-    if any_glitch {
-        limited(&mut img, gl_a.as_ref(), |img| {
-            if p.blocks > 0.001 {
-                blocks(img, p, u);
-            }
-            if p.sort_amount > 0.001 {
-                pixel_sort(img, p);
-            }
-            if p.slices > 0.001 {
-                slices(img, p, u);
-            }
-            if p.streaks > 0.001 {
-                streaks(img, p, u);
-            }
-            if split && separate {
-                *img = channel_shift(img, p.rgb_split, p.rgb_angle, 0.0, u);
-            }
-        });
-    }
-    if separate {
-        if aberration {
-            limited(&mut img, fx_a.as_ref(), |img| *img = channel_shift(img, 0.0, 0.0, p.aberration, u));
-        }
-    } else if split || aberration {
-        img = channel_shift(&img, p.rgb_split, p.rgb_angle, p.aberration, u);
-    }
-
-    // --- Texture -----------------------------------------------------------
-    let textured = p.posterize > 0.001 || p.scanlines > 0.001 || p.sensor_noise > 0.001 || p.grain > 0.001;
-    if textured {
-        limited(&mut img, fx_a.as_ref(), |img| texture(img, p, u));
-    }
-
-    // --- Vignette ----------------------------------------------------------
-    if p.vignette.abs() > 0.001 {
-        limited(&mut img, fx_a.as_ref(), |img| vignette(img, p));
+    // --- Effects and glitches: the whole photo's, then each mask's own -----
+    effects(&mut img, p, u);
+    for (q, a) in fx {
+        let before = img.clone();
+        effects(&mut img, q, u);
+        keep_inside(&mut img, &before, a);
     }
 
     // --- Layers placed on top of the finished look ---------------------------
@@ -1201,6 +1320,43 @@ fn finish(
         alpha = alpha.map(|a| pad_alpha(&a, iw, ih, img.w, img.h));
     }
     Rendered { img, overlay, alpha }
+}
+
+/// The Effects and Glitch tabs after the glow: resolution, glitches,
+/// channel shifts, texture and vignette.
+fn effects(img: &mut Img, p: &Params, u: f32) {
+    // --- Resolution --------------------------------------------------------
+    if p.lowres > 0.001 {
+        *img = low_res(img, p);
+    }
+
+    // --- Glitch ------------------------------------------------------------
+    if p.blocks > 0.001 {
+        blocks(img, p, u);
+    }
+    if p.sort_amount > 0.001 {
+        pixel_sort(img, p);
+    }
+    if p.slices > 0.001 {
+        slices(img, p, u);
+    }
+    if p.streaks > 0.001 {
+        streaks(img, p, u);
+    }
+    // RGB split (Glitch) and aberration (Effects) share one pass
+    if p.rgb_split > 0.001 || p.aberration > 0.001 {
+        *img = channel_shift(img, p.rgb_split, p.rgb_angle, p.aberration, u);
+    }
+
+    // --- Texture -----------------------------------------------------------
+    if p.posterize > 0.001 || p.scanlines > 0.001 || p.sensor_noise > 0.001 || p.grain > 0.001 {
+        texture(img, p, u);
+    }
+
+    // --- Vignette ----------------------------------------------------------
+    if p.vignette.abs() > 0.001 {
+        vignette(img, p);
+    }
 }
 
 /// Centre a `w × h` opacity map in a fully opaque `ow × oh` one.
@@ -1800,7 +1956,9 @@ mod tests {
     #[test]
     fn effects_can_be_limited_to_a_mask() {
         let src = grey(200, 100);
-        let p = Params { grain: 1.0, masks: vec![Mask { effects: true, ..left_spot() }], ..Params::default() };
+        let mut m = left_spot();
+        m.fx.grain = 1.0;
+        let p = Params { masks: vec![m], ..Params::default() };
         let out = process(&src, &p);
         let spread = |x0: usize, x1: usize| {
             let v: Vec<f32> = (40..60).flat_map(|y| (x0..x1).map(move |x| (x, y))).map(|(x, y)| out.px[y * 200 + x][0]).collect();
@@ -1811,6 +1969,94 @@ mod tests {
         // without the mask the same grain covers everything
         let all = process(&src, &Params { grain: 1.0, ..Params::default() });
         assert!((150..170).any(|x| (all.px[50 * 200 + x][0] - 0.5).abs() > 0.02));
+    }
+
+    /// Two masks, two different effects: each shows only inside its own mask.
+    #[test]
+    fn each_mask_has_its_own_effects() {
+        let src = grey(200, 100);
+        let mut left = left_spot();
+        left.fx.grain = 1.0;
+        let mut right = Mask { shape: Shape::Radial { c: [0.8, 0.5], rx: 0.06, ry: 0.06, angle: 0.0, feather: 0.1 }, ..Mask::default() };
+        right.fx.posterize = 1.0;
+        right.fx.dither = false;
+        right.fx.vignette = 0.0;
+        right.adj.exposure = 0.0;
+        let out = process(&src, &Params { masks: vec![left, right], exposure: 0.15, ..Params::default() });
+        let spread = |x0: usize, x1: usize| {
+            let v: Vec<f32> = (45..55).flat_map(|y| (x0..x1).map(move |x| (x, y))).map(|(x, y)| out.px[y * 200 + x][0]).collect();
+            v.iter().cloned().fold(f32::MIN, f32::max) - v.iter().cloned().fold(f32::MAX, f32::min)
+        };
+        assert!(spread(45, 55) > 0.05, "grain in the left mask");
+        assert!(spread(155, 165) < 1e-4, "no grain in the right one");
+        // posterized to a few levels inside the right mask, untouched in between
+        let plain = process(&src, &Params { exposure: 0.15, ..Params::default() });
+        assert!((out.px[50 * 200 + 160][0] - plain.px[50 * 200 + 160][0]).abs() > 0.01, "posterized on the right");
+        assert_eq!(out.px[50 * 200 + 100], plain.px[50 * 200 + 100], "nothing between the masks");
+    }
+
+    #[test]
+    fn whole_photo_effects_still_cover_everything_with_masks_around() {
+        let src = grey(200, 100);
+        let mut m = left_spot();
+        m.fx.grain = 1.0;
+        let out = process(&src, &Params { vignette: 0.8, masks: vec![m], ..Params::default() });
+        let plain = process(&src, &Params::default());
+        assert!(out.px[2 * 200 + 198][0] < plain.px[2 * 200 + 198][0] - 0.05, "the whole photo's vignette darkens the far corner");
+    }
+
+    /// Projects from before per-mask effects: the Effects tab limited to a
+    /// mask becomes that mask's own effects.
+    #[test]
+    fn old_projects_move_limited_effects_onto_the_mask() {
+        let src = grey(200, 100);
+        let mut p = Params { grain: 1.0, sort_amount: 0.5, masks: vec![Mask { effects: true, ..left_spot() }], ..Params::default() };
+        p.migrate();
+        assert_eq!(p.grain, 0.0);
+        assert_eq!(p.masks[0].fx.grain, 1.0);
+        assert!(!p.masks[0].effects);
+        // the glitch tab wasn't limited, so it stays on the whole photo
+        assert_eq!(p.sort_amount, 0.5);
+        assert_eq!(p.masks[0].fx.sort_amount, 0.0);
+        let out = process(&src, &Params { sort_amount: 0.0, ..p });
+        assert!((150..170).all(|x| (out.px[50 * 200 + x][0] - 0.5).abs() < 1e-4), "no grain outside");
+        // a hidden mask used to mean the whole photo: nothing moves
+        let mut q = Params { grain: 1.0, masks: vec![Mask { effects: true, enabled: false, ..left_spot() }], ..Params::default() };
+        q.migrate();
+        assert_eq!(q.grain, 1.0);
+        // and the old flags aren't written any more
+        let json = serde_json::to_string(&q.masks[0]).unwrap();
+        assert!(!json.contains("\"effects\"") && !json.contains("\"fx\""), "{json}");
+    }
+
+    #[test]
+    fn reset_field_leaves_out_one_slider() {
+        let mut p = Params { contrast: 0.5, exposure: 0.3, ..Params::default() };
+        assert!(p.reset_field("contrast"));
+        assert_eq!((p.contrast, p.exposure), (0.0, 0.3));
+        assert!(!p.reset_field("contrast"), "nothing left to reset");
+        assert!(!p.reset_field("no_such_field"));
+        let mut fx = MaskFx { grain: 0.4, ..Default::default() };
+        assert!(fx.reset_field("grain") && fx.grain == 0.0);
+    }
+
+    /// A mask's Adjust settings match the whole photo's Adjust tab.
+    #[test]
+    fn mask_adjust_matches_the_whole_photo() {
+        let src = gradient(64, 48);
+        let everywhere = Mask { shape: Shape::Everything, ..Mask::default() };
+        for (global, local) in [
+            (Params { whites: 0.5, ..Params::default() }, crate::masks::Local { whites: 0.5, ..Default::default() }),
+            (Params { fade: 0.6, ..Params::default() }, crate::masks::Local { fade: 0.6, ..Default::default() }),
+            (Params { vibrance: 0.7, ..Params::default() }, crate::masks::Local { vibrance: 0.7, ..Default::default() }),
+            (Params { mono: true, ..Params::default() }, crate::masks::Local { mono: true, ..Default::default() }),
+            (Params { shadow_tone: 0.8, ..Params::default() }, crate::masks::Local { shadow_tone: 0.8, ..Default::default() }),
+        ] {
+            let a = process(&src, &global);
+            let b = process(&src, &Params { masks: vec![Mask { adj: local.clone(), ..everywhere.clone() }], ..Params::default() });
+            let worst = a.px.iter().zip(&b.px).map(|(x, y)| (0..3).map(|c| (x[c] - y[c]).abs()).fold(0.0, f32::max)).fold(0.0, f32::max);
+            assert!(worst < 0.01, "{local:?}: off by {worst}");
+        }
     }
 
     #[test]
@@ -1968,11 +2214,12 @@ mod tests {
             if layered {
                 p.layers.push(crate::layers::Layer { path: red.clone(), aspect: 1.0, x: 0.2, y: 0.3, scale: 0.2, ..Default::default() });
             }
-            for step in 0..5 {
+            for step in 0..6 {
                 match step {
                     1 => p.vignette = 0.5,
                     2 => p.masks[0].adj.exposure = 1.0,
-                    3 => p.masks[0].effects = true,
+                    3 => p.masks[0].fx.bloom = 0.6,
+                    5 => p.masks[0].fx.grain = 0.5,
                     4 => p.exposure = -0.2,
                     _ => {}
                 }

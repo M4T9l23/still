@@ -11,6 +11,7 @@ mod magnet;
 mod masks;
 mod pipeline;
 mod retouch;
+mod search;
 mod text;
 mod ui_kit;
 mod update;

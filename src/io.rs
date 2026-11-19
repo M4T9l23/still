@@ -998,6 +998,7 @@ pub fn read_project(path: &Path) -> Result<(PathBuf, Params), String> {
     let photo = resolve(&file.photo, file.photo_relative.as_ref())
         .ok_or_else(|| format!("photo not found: {}", Path::new(&file.photo).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()))?;
     let mut params = file.params;
+    params.migrate();
     for (i, l) in params.layers.iter_mut().enumerate() {
         if let Some(p) = resolve(&l.path, file.layers_relative.get(i).and_then(|r| r.as_ref())) {
             l.path = p.to_string_lossy().to_string();
