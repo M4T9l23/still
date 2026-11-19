@@ -203,6 +203,13 @@ pub struct Params {
     pub highlight_hue: f32,
     pub highlight_tone: f32,
 
+    // Noise reduction (see `denoise`): the photo's own noise, so it belongs to
+    // the photo like the crop does, and a preset never brings or takes it.
+    pub denoise_luma: f32,
+    /// 0.5 is neutral; higher keeps more fine texture (and grain).
+    pub denoise_detail: f32,
+    pub denoise_color: f32,
+
     // Optics
     pub bloom: f32,
     pub bloom_radius: f32,
@@ -298,6 +305,9 @@ impl Default for Params {
             shadow_tone: 0.0,
             highlight_hue: 35.0,
             highlight_tone: 0.0,
+            denoise_luma: 0.0,
+            denoise_detail: 0.5,
+            denoise_color: 0.0,
             bloom: 0.0,
             bloom_radius: 0.4,
             bloom_threshold: 0.5,
@@ -351,7 +361,8 @@ impl Default for Params {
 }
 
 impl Params {
-    /// Copy only the "look" from another set of params, keeping geometry & frame.
+    /// Copy only the "look" from another set of params, keeping geometry,
+    /// frame and noise reduction.
     pub fn with_look_from(&self, look: &Params) -> Params {
         let mut p = look.clone();
         p.rotate = self.rotate;
@@ -362,6 +373,9 @@ impl Params {
         p.crop = self.crop;
         p.border = self.border;
         p.border_white = self.border_white;
+        p.denoise_luma = self.denoise_luma;
+        p.denoise_detail = self.denoise_detail;
+        p.denoise_color = self.denoise_color;
         p.masks = self.masks.clone();
         p.layers = self.layers.clone();
         p.layer_groups = self.layer_groups.clone();
@@ -423,7 +437,8 @@ impl Params {
             shadow_tone, highlight_hue, highlight_tone, sharpen, softness, bloom, bloom_radius, bloom_threshold, astig, astig_length,
             astig_angle, astig_rays, halation, aberration, vignette, vignette_feather, grain, grain_size, grain_color, sensor_noise,
             scanlines, scanline_spacing, posterize, dither, lowres, lowres_smooth, sort_amount, sort_low, sort_high, sort_vertical,
-            sort_reverse, streaks, streak_width, slices, slice_shift, rgb_split, rgb_angle, blocks, block_size, straighten, border
+            sort_reverse, streaks, streak_width, slices, slice_shift, rgb_split, rgb_angle, blocks, block_size, straighten, border,
+            denoise_luma, denoise_detail, denoise_color
         )
     }
 
@@ -445,6 +460,17 @@ impl Params {
             m.effects = false;
             m.glitch = false;
         }
+    }
+
+    /// The noise reduction to run, if any. Settings that come out the same
+    /// compare equal (Detail does nothing without Luminance), so the cache
+    /// keeps them as one.
+    pub fn denoise(&self) -> Option<crate::denoise::Amounts> {
+        let on = |v: f32| if v.is_finite() && v > 0.001 { v } else { 0.0 };
+        let (luma, color) = (on(self.denoise_luma), on(self.denoise_color));
+        let detail = if luma > 0.0 && self.denoise_detail.is_finite() { self.denoise_detail } else { 0.5 };
+        let a = crate::denoise::Amounts { luma, detail, color };
+        a.any().then_some(a)
     }
 
     /// The layers as they render: members of a hidden group count as hidden.
@@ -1178,7 +1204,10 @@ fn from_stage(mut img: Img, space: &crate::masks::Space, judged: Option<Judged>,
 
 /// Full render; also returns the opacity of mask `overlay` for on-screen display.
 pub fn process_ext(src: &Img, p: &Params, overlay: Option<usize>) -> Rendered {
-    let s = base(src, p, overlay);
+    // Noise reduction comes first, on the photo as it was shot: before
+    // straightening resamples the noise and the tone curves reshape it.
+    let clean = p.denoise().map(|a| crate::denoise::denoise(src, a));
+    let s = base(clean.as_ref().unwrap_or(src), p, overlay);
     from_stage(s.img, &s.space, s.judged, p, overlay)
 }
 
@@ -1189,6 +1218,23 @@ pub fn process_ext(src: &Img, p: &Params, overlay: Option<usize>) -> Rendered {
 pub struct StageCache {
     /// (source, key) → stage. Two slots: draft and full preview.
     slots: Vec<(Arc<Img>, StageKey, Arc<Stage>)>,
+    /// (source, noise reduction) → the cleaned source, which the stages
+    /// above then start from. A few, so switching it off and on is instant.
+    clean: Vec<(Arc<Img>, crate::denoise::Amounts, Arc<Img>)>,
+}
+
+/// The source with its noise reduced, from the cache when it's there.
+fn cleaned(src: &Arc<Img>, p: &Params, cache: &mut StageCache) -> Arc<Img> {
+    let Some(a) = p.denoise() else { return src.clone() };
+    if let Some((_, _, img)) = cache.clean.iter().find(|(s, k, _)| Arc::ptr_eq(s, src) && *k == a) {
+        return img.clone();
+    }
+    let img = Arc::new(crate::denoise::denoise(src, a));
+    cache.clean.push((src.clone(), a, img.clone()));
+    if cache.clean.len() > 3 {
+        cache.clean.remove(0);
+    }
+    img
 }
 
 type StageKey = (Params, bool, Option<usize>);
@@ -1241,6 +1287,8 @@ fn stage_key(p: &Params, overlay: Option<usize>) -> StageKey {
 
 /// `process_ext`, reusing the cached first stage when it still applies.
 pub fn process_cached(src: &Arc<Img>, p: &Params, overlay: Option<usize>, cache: &mut StageCache) -> Rendered {
+    // a new noise reduction is a new source as far as the stage goes
+    let src = &cleaned(src, p, cache);
     let key = stage_key(p, overlay);
     let hit = cache.slots.iter().position(|(s, k, _)| Arc::ptr_eq(s, src) && *k == key);
     let stage = match hit {
@@ -2214,13 +2262,16 @@ mod tests {
             if layered {
                 p.layers.push(crate::layers::Layer { path: red.clone(), aspect: 1.0, x: 0.2, y: 0.3, scale: 0.2, ..Default::default() });
             }
-            for step in 0..6 {
+            for step in 0..9 {
                 match step {
                     1 => p.vignette = 0.5,
                     2 => p.masks[0].adj.exposure = 1.0,
                     3 => p.masks[0].fx.bloom = 0.6,
                     5 => p.masks[0].fx.grain = 0.5,
                     4 => p.exposure = -0.2,
+                    6 => p.denoise_luma = 0.5,
+                    7 => p.denoise_color = 0.7,
+                    8 => p.denoise_luma = 0.0,
                     _ => {}
                 }
                 let a = process_cached(&src, &p, Some(0), &mut cache);

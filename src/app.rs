@@ -3723,6 +3723,22 @@ impl App {
 // Sidebar
 // ---------------------------------------------------------------------------
 
+/// What a preset keeps of an edit: not its masks, layers or retouching, nor
+/// its noise reduction, which belongs to the photo (applying a preset keeps
+/// the photo's own).
+fn preset_of(p: &Params) -> Params {
+    let d = Params::default();
+    Params {
+        masks: Vec::new(),
+        layers: Vec::new(),
+        retouch: Vec::new(),
+        denoise_luma: d.denoise_luma,
+        denoise_detail: d.denoise_detail,
+        denoise_color: d.denoise_color,
+        ..p.clone()
+    }
+}
+
 macro_rules! modified {
     ($p:expr, $($f:ident),+) => {{ let d = Params::default(); false $( || $p.$f != d.$f )+ }};
 }
@@ -3844,6 +3860,17 @@ fn adjust_ui(ui: &mut Ui, p: &mut Params, h: &mut Hider) {
         eye!(h, ui, p.softness, "Soften", 0.0..=1.0, 0.0, Fmt::Amount);
     }) {
         reset!(p, sharpen, softness);
+    }
+    if k::section(ui, "Noise Reduction", modified!(p, denoise_luma, denoise_detail, denoise_color), |ui| {
+        eye!(h, ui, p.denoise_luma, "Luminance", 0.0..=1.0, 0.0, Fmt::Amount);
+        // Detail tunes the luminance smoothing: nothing to tune without it
+        ui.add_enabled_ui(p.denoise_luma > 0.0, |ui| {
+            eye!(h, ui, p.denoise_detail, "Detail", 0.0..=1.0, 0.5, Fmt::Amount);
+        });
+        eye!(h, ui, p.denoise_color, "Color", 0.0..=1.0, 0.0, Fmt::Amount);
+        k::caption(ui, "Measures the photo's own noise. Best judged zoomed in.");
+    }) {
+        reset!(p, denoise_luma, denoise_detail, denoise_color);
     }
 }
 
@@ -4192,7 +4219,7 @@ impl App {
         }
         let mut changed = false;
         if let Some(i) = overwrite {
-            self.user_presets[i].1 = Params { masks: Vec::new(), layers: Vec::new(), retouch: Vec::new(), ..self.params.clone() };
+            self.user_presets[i].1 = preset_of(&self.params);
             changed = true;
         }
         if let Some(i) = delete {
@@ -4202,7 +4229,7 @@ impl App {
 
         ui.add_space(8.0);
         k::section(ui, "Save Preset", false, |ui| {
-            k::caption(ui, "Saves every adjustment except crop, border, masks and layers.");
+            k::caption(ui, "Saves every adjustment except crop, border, noise reduction, masks and layers.");
             ui.add_space(4.0);
             ui.horizontal(|ui| {
                 let te = egui::TextEdit::singleline(&mut self.new_preset)
@@ -4213,7 +4240,7 @@ impl App {
                 let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                 let ok = !self.new_preset.trim().is_empty();
                 if (k::button(ui, "Save", Btn::Secondary, ok).clicked() || enter) && ok {
-                    self.user_presets.push((self.new_preset.trim().to_string(), Params { masks: Vec::new(), layers: Vec::new(), retouch: Vec::new(), ..self.params.clone() }));
+                    self.user_presets.push((self.new_preset.trim().to_string(), preset_of(&self.params)));
                     self.new_preset.clear();
                     changed = true;
                 }
@@ -6468,6 +6495,10 @@ impl App {
                 };
                 if !blocked.is_empty() {
                     msg = format!("{msg}. {blocked}");
+                } else if tab == Tab::Adjust && self.target.is_some() && [place.label, place.section].contains(&"Noise Reduction") {
+                    // a mask's own Adjust has no noise reduction: it is the whole photo's
+                    self.target = None;
+                    msg = format!("{msg}. Apply To is now Whole Photo");
                 }
                 k::find(ctx, place.section, place.label);
             }
@@ -7635,6 +7666,43 @@ mod tests {
         assert!(TABS[a.tab].0 == Tab::Effects);
         assert!(!a.settings_open);
         assert!(a.toast.as_ref().is_some_and(|t| t.0.contains("Effects › Optics")), "{:?}", a.toast);
+    }
+
+    #[test]
+    fn e2e_noise_reduction_previews_hides_and_is_found() {
+        use egui_kittest::kittest::Queryable;
+        let mut h = open_on("denoise", Tab::Masks);
+        h.state_mut().tab = TABS.iter().position(|t| t.0 == Tab::Adjust).unwrap();
+        settle(&mut h, |a| a.tex_frame == Frame::Output && rendered(a));
+        h.state_mut().params.denoise_luma = 0.7;
+        h.state_mut().params.denoise_color = 0.5;
+        settle(&mut h, |a| a.last_sent.as_ref().is_some_and(|s| s.0.denoise_luma == 0.7) && rendered(a));
+        // its eye (below the fold here, so set as a click would) leaves
+        // luminance out of the preview only, colour staying on
+        assert!(h.query_by_label("Hide Luminance").is_some());
+        h.state_mut().hidden.insert("denoise_luma".into());
+        settle(&mut h, |a| a.last_sent.as_ref().is_some_and(|s| s.0.denoise_luma == 0.0 && s.0.denoise_color == 0.5) && rendered(a));
+        assert_eq!(h.state().params.denoise_luma, 0.7, "the export keeps it");
+        // a preset leaves the photo's noise reduction alone
+        let look = h.state().builtin[0].1.clone();
+        let p = h.state().params.with_look_from(&look);
+        assert_eq!((p.denoise_luma, p.denoise_color), (0.7, 0.5));
+        assert_eq!(preset_of(&h.state().params).denoise_luma, 0.0);
+        // and the search finds it, even from a mask's own Adjust, which lacks it
+        h.state_mut().add_mask(1);
+        h.state_mut().target = Some(0);
+        h.step();
+        // (Luminance is still hidden from above, so its eye offers to show it)
+        assert!(h.query_by_label("Show Luminance").is_none());
+        let place = search::search("denoise", true)[0];
+        assert_eq!(place.label, "Noise Reduction");
+        let ctx = h.ctx.clone();
+        h.state_mut().go_to(place, &ctx);
+        h.step();
+        assert!(TABS[h.state().tab].0 == Tab::Adjust);
+        assert_eq!(h.state().target, None);
+        assert!(h.state().toast.as_ref().is_some_and(|t| t.0.contains("Whole Photo")), "{:?}", h.state().toast);
+        assert!(h.query_by_label("Show Luminance").is_some());
     }
 
     #[test]

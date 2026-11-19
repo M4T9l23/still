@@ -5,6 +5,7 @@
 
 mod app;
 mod browse;
+mod denoise;
 mod io;
 mod layers;
 mod magnet;

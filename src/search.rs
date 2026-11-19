@@ -80,6 +80,10 @@ pub static PLACES: &[Place] = places![
     "Highlight Hue", Tab("Adjust"), "Split Tone", "split toning highlights colour";
     "Sharpen", Tab("Adjust"), "Detail", "sharpness crisp detail clarity";
     "Soften", Tab("Adjust"), "Detail", "blur soft dreamy smooth";
+    "Noise Reduction", Tab("Adjust"), "", "denoise grain grainy speckles high iso night low light clean";
+    "Luminance", Tab("Adjust"), "Noise Reduction", "denoise grain grainy speckles high iso night luma brightness";
+    "Detail", Tab("Adjust"), "Noise Reduction", "denoise texture keep fine grain";
+    "Color", Tab("Adjust"), "Noise Reduction", "denoise chroma colour blotches mottling confetti speckles";
 
     // --- Effects ---------------------------------------------------------------
     "Bloom", Tab("Effects"), "Optics", "glow light dreamy";
@@ -289,6 +293,10 @@ mod tests {
         assert_eq!(first("white balance"), "Temperature");
         assert_eq!(first("contrst"), "Contrast");
         assert_eq!(first("remove background"), "Make Transparent");
+        assert_eq!(first("noise"), "Noise Reduction");
+        assert_eq!(first("denoise"), "Noise Reduction");
+        assert_eq!(first("grain"), "Grain");
+        assert_eq!(search("colour noise", true)[0].path(), "Adjust › Noise Reduction");
         assert_eq!(search("vignette", true)[0].path(), "Effects › Optics");
         assert!(search("zzzz", true).is_empty());
         assert!(search("   ", true).is_empty());
